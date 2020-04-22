@@ -1,35 +1,46 @@
+import atexit
 from datetime import datetime
 from enum import Enum
 from typing import Optional, Sequence, List
 
+from pymongo import MongoClient
+from pymongo.database import Database
 from mongoengine import DateTimeField, Document, FloatField, StringField, connect
 
 from vnpy.trader.constant import Exchange, Interval
 from vnpy.trader.object import BarData, TickData
 from .database import BaseDatabaseManager, Driver
 
+mongo: Optional[MongoClient] = None
+db: Optional[Database] = None
+
+
+def on_exit():
+    if mongo is not None:
+        mongo.close()
+
+
+atexit.register(on_exit)
+
 
 def init(_: Driver, settings: dict):
-    database = settings["database"]
-    host = settings["host"]
-    port = settings["port"]
-    username = settings["user"]
-    password = settings["password"]
-    authentication_source = settings["authentication_source"]
+    database = settings.get("database")
+    config = {
+        'host': settings.get('host'),
+        'port': settings.get('port'),
+        'username': settings.get('user'),
+        'password': settings.get('password'),
+        'authSource': settings.get('authentication_source'),
+    }
+    if not config.get('username'):
+        del config['username']
+        del config['password']
+        del config['authSource']
 
-    if not username:  # if username == '' or None, skip username
-        username = None
-        password = None
-        authentication_source = None
-
-    connect(
-        db=database,
-        host=host,
-        port=port,
-        username=username,
-        password=password,
-        authentication_source=authentication_source,
-    )
+    global mongo
+    mongo = MongoClient(**{k: v for k, v in config.items() if not v is None})
+    global db
+    db = mongo[database]
 
     return MongoManager()
 
@@ -260,29 +271,51 @@ class DbTickData(Document):
         return tick
 
 
+def to_bar(ex: str, s: str, o: dict):
+    return BarData(
+        symbol=s,
+        exchange=ex.upper(),
+        datetime=o['datetime'],
+        interval=Interval(o['period']),
+        volume=o['volume'],
+        open_interest=o['open_interest'],
+        open_price=o['price'],
+        high_price=o['high'],
+        low_price=o['low'],
+        close_price=o['close'],
+        gateway_name="DB",
+    )
+
+
+def from_bar(ex: str, s: str, data: BarData):
+    return {
+        'datetime': data.datetime,
+        'open': data.open_price,
+        'close': data.close_price,
+        'high': data.high_price,
+        'low': data.low_price,
+        'volume': data.volume,
+        'open_interest': data.open_interest,
+        'period': data.interval.value,
+        'symbol': s,
+        'ex': ex
+    }
+
+
 class MongoManager(BaseDatabaseManager):
 
-    def load_bar_data(
-        self,
-        symbol: str,
-        exchange: Exchange,
-        interval: Interval,
-        start: datetime,
-        end: datetime,
-    ) -> Sequence[BarData]:
-        s = DbBarData.objects(
-            symbol=symbol,
-            exchange=exchange.value,
-            interval=interval.value,
-            datetime__gte=start,
-            datetime__lte=end,
-        )
-        data = [db_bar.to_bar() for db_bar in s]
-        return data
+    def load_bar_data(self, symbol: str,
+                      exchange: Exchange,
+                      interval: Interval,
+                      start: datetime,
+                      end: datetime, ) -> Sequence[BarData]:
+        ex, s = exchange.value.lower(), symbol.lower()
+        col = db[f'kline:{ex}:{s}']
+        res = col.find({'period': interval.value, 'datetime': {'$gte': start, '$let': end}}).sort('datetime', 1)
+        return [to_bar(ex, s, i) for i in res]
 
-    def load_tick_data(
-        self, symbol: str, exchange: Exchange, start: datetime, end: datetime
-    ) -> Sequence[TickData]:
+    def load_tick_data(self, symbol: str, exchange: Exchange, start: datetime, end: datetime) -> Sequence[TickData]:
+        # todo:
         s = DbTickData.objects(
             symbol=symbol,
             exchange=exchange.value,
@@ -299,18 +332,19 @@ class MongoManager(BaseDatabaseManager):
             for k, v in d.__dict__.items()
         }
 
-    def save_bar_data(self, datas: Sequence[BarData]):
-        for d in datas:
-            updates = self.to_update_param(d)
-            updates.pop("set__gateway_name")
-            updates.pop("set__vt_symbol")
-            (
-                DbBarData.objects(
-                    symbol=d.symbol, interval=d.interval.value, datetime=d.datetime
-                ).update_one(upsert=True, **updates)
-            )
+    def save_bar_data(self, data_list: Sequence[BarData]):
+        if len(data_list) == 0:
+            return
+        min_time = min(data_list, key=lambda x: x.datetime).datetime
+        max_time = max(data_list, key=lambda x: x.datetime).datetime
+        ex, s, p = data_list[0].exchange.lower(), data_list[0].symbol.lower(), data_list[0].interval.value
+        col = db[f'kline:{ex}:{s}']
+        col.delete_many({'period': p, 'datetime': {'$gt': min_time, '$lt': max_time}})
+        ds = (from_bar(ex, s, i) for i in data_list)
+        col.insert_many(ds)
 
     def save_tick_data(self, datas: Sequence[TickData]):
+        # todo:
         for d in datas:
             updates = self.to_update_param(d)
             updates.pop("set__gateway_name")
@@ -321,91 +355,58 @@ class MongoManager(BaseDatabaseManager):
                 ).update_one(upsert=True, **updates)
             )
 
-    def get_newest_bar_data(
-        self, symbol: str, exchange: "Exchange", interval: "Interval"
-    ) -> Optional["BarData"]:
-        s = (
-            DbBarData.objects(
-                symbol=symbol,
-                exchange=exchange.value,
-                interval=interval.value
-            )
-            .order_by("-datetime")
-            .first()
-        )
-        if s:
-            return s.to_bar()
-        return None
+    def get_newest_bar_data(self, symbol: str, exchange: "Exchange", interval: "Interval") -> Optional["BarData"]:
+        ex, s = exchange.value.lower(), symbol.lower()
+        col = db[f'kline:{ex}:{s}']
+        res = col.find_one({'period': interval.value}).sort('datetime', -1)
+        if res:
+            return to_bar(ex, s, res)
+        else:
+            return None
 
-    def get_oldest_bar_data(
-        self, symbol: str, exchange: "Exchange", interval: "Interval"
-    ) -> Optional["BarData"]:
-        s = (
-            DbBarData.objects(
-                symbol=symbol,
-                exchange=exchange.value,
-                interval=interval.value
-            )
-            .order_by("+datetime")
-            .first()
-        )
-        if s:
-            return s.to_bar()
-        return None
+    def get_oldest_bar_data(self, symbol: str, exchange: "Exchange", interval: "Interval") -> Optional["BarData"]:
+        ex, s = exchange.value.lower(), symbol.lower()
+        col = db[f'kline:{ex}:{s}']
+        res = col.find_one({'period': interval.value}).sort('datetime', 1)
+        if res:
+            return to_bar(ex, s, res)
+        else:
+            return None
 
-    def get_newest_tick_data(
-        self, symbol: str, exchange: "Exchange"
-    ) -> Optional["TickData"]:
+    def get_newest_tick_data(self, symbol: str, exchange: "Exchange") -> Optional["TickData"]:
+        # todo:
         s = (
             DbTickData.objects(symbol=symbol, exchange=exchange.value)
-            .order_by("-datetime")
-            .first()
+                .order_by("-datetime")
+                .first()
         )
         if s:
             return s.to_tick()
         return None
 
     def get_bar_data_statistics(self) -> List:
-        """"""
-        s = (
-            DbBarData.objects.aggregate({
-                "$group": {
-                    "_id": {
-                        "symbol": "$symbol",
-                        "exchange": "$exchange",
-                        "interval": "$interval",
-                    },
-                    "count": {"$sum": 1}
-                }
-            })
-        )
+        res = []
+        for col_name in (i for i in db.list_collection_names() if i.startswith('kline:')):
+            ex, s = col_name.split(':')[1:]
+            for p in db[col_name].distinct('period'):
+                count = db['col_name'].count_documents({'period': p})
+                res.append({'symbol': s, 'exchange': ex.upper(), 'interval': p, 'count': count})
+        return res
 
-        result = []
-
-        for d in s:
-            data = d["_id"]
-            data["count"] = d["count"]
-            result.append(data)
-
-        return result
-
-    def delete_bar_data(
-        self,
-        symbol: str,
-        exchange: "Exchange",
-        interval: "Interval"
-    ) -> int:
+    def delete_bar_data(self, symbol: str, exchange: "Exchange", interval: "Interval") -> int:
         """
         Delete all bar data with given symbol + exchange + interval.
         """
-        count = DbBarData.objects(
-            symbol=symbol,
-            exchange=exchange.value,
-            interval=interval.value
-        ).delete()
 
+        ex = exchange.value.lower()
+        s = symbol.lower()
+        col = db[f'kline:{ex}:{s}']
+        count = col.estimated_document_count()
+        col.drop()
         return count
 
     def clean(self, symbol: str):
-        DbTickData.objects(symbol=symbol).delete()
-        DbBarData.objects(symbol=symbol).delete()
+        for col_name in (i for i in db.list_collection_names() if i.startswith('kline:') or i.startswith('tick:')):
+            ex, s = col_name.split(':')[1:]
+            if symbol.lower() == s:
+                db[col_name].drop()

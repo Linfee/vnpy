@@ -1,4 +1,6 @@
+demo
 # Python
+venv
 *.pyc
 *.pyo
 *.egg-info/
