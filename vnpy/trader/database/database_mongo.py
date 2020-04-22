@@ -358,18 +358,18 @@ class MongoManager(BaseDatabaseManager):
     def get_newest_bar_data(self, symbol: str, exchange: "Exchange", interval: "Interval") -> Optional["BarData"]:
         ex, s = exchange.value.lower(), symbol.lower()
         col = db[f'kline:{ex}:{s}']
-        res = col.find_one({'period': interval.value}).sort('datetime', -1)
+        res = col.find({'period': interval.value}).sort('datetime', -1).limit(1)
         if res:
-            return to_bar(ex, s, res)
+            return to_bar(ex, s, res[0])
         else:
             return None
 
     def get_oldest_bar_data(self, symbol: str, exchange: "Exchange", interval: "Interval") -> Optional["BarData"]:
         ex, s = exchange.value.lower(), symbol.lower()
         col = db[f'kline:{ex}:{s}']
-        res = col.find_one({'period': interval.value}).sort('datetime', 1)
+        res = col.find({'period': interval.value}).sort('datetime', 1).limit(1)
         if res:
-            return to_bar(ex, s, res)
+            return to_bar(ex, s, res[0])
         else:
             return None
 
