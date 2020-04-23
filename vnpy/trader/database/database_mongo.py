@@ -274,12 +274,12 @@ class DbTickData(Document):
 def to_bar(ex: str, s: str, o: dict):
     return BarData(
         symbol=s,
-        exchange=ex.upper(),
+        exchange=Exchange(ex.upper()),
         datetime=o['datetime'],
         interval=Interval(o['period']),
         volume=o['volume'],
         open_interest=o['open_interest'],
-        open_price=o['price'],
+        open_price=o['open'],
         high_price=o['high'],
         low_price=o['low'],
         close_price=o['close'],
