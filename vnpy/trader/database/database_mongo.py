@@ -1,5 +1,5 @@
 import atexit
-from datetime import datetime
+from datetime import datetime, date
 from enum import Enum
 from typing import Optional, Sequence, List
 
@@ -309,9 +309,13 @@ class MongoManager(BaseDatabaseManager):
                       interval: Interval,
                       start: datetime,
                       end: datetime, ) -> Sequence[BarData]:
+        if isinstance(start, date):
+            start = datetime(start.year, start.month, start.day)
+        if isinstance(end, date):
+            end = datetime(end.year, end.month, end.day)
         ex, s = exchange.value.lower(), symbol.lower()
         col = db[f'kline:{ex}:{s}']
-        res = col.find({'period': interval.value, 'datetime': {'$gte': start, '$let': end}}).sort('datetime', 1)
+        res = col.find({'period': interval.value, 'datetime': {'$gte': start, '$lte': end}}).sort('datetime', 1)
         return [to_bar(ex, s, i) for i in res]
 
     def load_tick_data(self, symbol: str, exchange: Exchange, start: datetime, end: datetime) -> Sequence[TickData]:

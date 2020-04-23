@@ -128,6 +128,7 @@ class Exchange(Enum):
     DERIBIT = "DERIBIT"
     GATEIO = "GATEIO"
     BITSTAMP = "BITSTAMP"
+    BINANCEF = "BINANCEF"
 
     # Special Function
     LOCAL = "LOCAL"         # For local generated data
@@ -148,5 +149,5 @@ class Interval(Enum):
     """
     MINUTE = "1m"
     HOUR = "1h"
-    DAILY = "d"
+    DAILY = "1d"
     WEEKLY = "w"
