@@ -78,8 +78,8 @@ def get_install_requires():
         "pyzmq",
         "QScintilla"
     ]
-    if not is_psycopg2_exists():
-        install_requires.append("psycopg2-binary")
+    # if not is_psycopg2_exists():
+    #     install_requires.append("psycopg2-binary")
 
     if sys.version_info.minor < 7:
         install_requires.append("dataclasses")
